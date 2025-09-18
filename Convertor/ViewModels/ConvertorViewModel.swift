@@ -13,6 +13,7 @@ class ConvertorViewModel: ObservableObject {
     private var conversionQueue = PassthroughSubject<UUID, Never>()
     private var cancellables = Set<AnyCancellable>()
     private let settings: Settings
+    private var activeConversions = 0
 
     init(settings: Settings) {
         self.settings = settings
@@ -47,8 +48,12 @@ class ConvertorViewModel: ObservableObject {
                 .catch { error in Just((itemID, .failure(error))) }
                 .handleEvents(receiveSubscription: { subscription in
                     DispatchQueue.main.async {
+                        self.activeConversions += 1
                         if let index = self.conversionItems.firstIndex(where: { $0.id == itemID }) {
-                            self.conversionItems[index].cancellable = AnyCancellable(subscription)
+                            var item = self.conversionItems[index]
+                            item.status = .converting
+                            item.cancellable = AnyCancellable(subscription)
+                            self.conversionItems[index] = item
                         }
                     }
                 })
@@ -64,6 +69,8 @@ class ConvertorViewModel: ObservableObject {
                     self.updateStatus(
                         for: itemID, status: .failed, error: error.localizedDescription)
                 }
+                self.activeConversions -= 1
+                self.sendNextPending()
             }
             .store(in: &cancellables)
     }
@@ -93,9 +100,18 @@ class ConvertorViewModel: ObservableObject {
     func convertAllFiles() {
         guard !isConverting else { return }
         isConverting = true
+        activeConversions = 0
 
-        for item in conversionItems where item.status == .pending {
-            conversionQueue.send(item.id)
+        for _ in 0..<settings.maxConcurrentTasks {
+            sendNextPending()
+        }
+    }
+
+    private func sendNextPending() {
+        if activeConversions < settings.maxConcurrentTasks,
+            let nextItem = conversionItems.first(where: { $0.status == .pending })
+        {
+            conversionQueue.send(nextItem.id)
         }
     }
 
@@ -109,6 +125,7 @@ class ConvertorViewModel: ObservableObject {
         for item in conversionItems {
             item.cancellable?.cancel()
         }
+        activeConversions = 0
         isConverting = false
     }
 
